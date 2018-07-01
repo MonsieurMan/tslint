@@ -74,49 +74,73 @@ function FAILURE_STRING(lineCount: number, lineLimit: number) {
         "Consider breaking this up into smaller parts.";
 }
 
-class MaxMethodLine extends Lint.AbstractWalker<{limit: number; includesNested: boolean}> {
+interface MaxMethodLineOptions {
+    limit: number;
+    includesNested: boolean;
+}
+
+class MaxMethodLine extends Lint.AbstractWalker<MaxMethodLineOptions> {
 
     // cache for line count
-    private linesOfCode = new Map<string, number>();
+    private cache = new Map<string, number>();
 
     public walk(sourceFile: ts.SourceFile) {
         const cb = (node: ts.Node): void => {
             if (isFunctionWithBody(node)) {
-                const limit = this.options.limit;
-                const lines = this.countLines(node.body!);
-                if (lines > limit) {
-                    this.addFailure(node.getStart(this.sourceFile), node.body!.pos, FAILURE_STRING(lines, limit));
-                }
+                this.applyRule(node);
             }
-            return ts.forEachChild(node, cb);
+            ts.forEachChild(node, cb);
         };
-        return ts.forEachChild(sourceFile, cb);
+        ts.forEachChild(sourceFile, cb);
+    }
+
+    private applyRule(node: ts.FunctionLikeDeclaration) {
+        const limit = this.options.limit;
+        const lines = this.countLines(node.body!);
+
+        if (lines > limit) {
+            this.addFailure(node.getStart(this.sourceFile), node.body!.pos, FAILURE_STRING(lines, limit));
+        }
     }
 
     private countLines(node: ts.Node): number {
         const nodeText = node.getText();
-        // check if size of node is already cached
-        if (this.linesOfCode.has(nodeText)) {
-            const alreadyComputed = this.linesOfCode.get(nodeText);
-            return alreadyComputed as number;
-        } else {
-            // compute the number of lines
-            const includesNested = this.options.includesNested;
-            let nbLinesToDrop = 0;
-            if (!includesNested) {
-                const nbLinesToDropFunction = (anode: ts.Node): void => {
-                    if (isFunctionDeclaration(anode) || isFunctionWithBody(anode)) {
-                        nbLinesToDrop += this.countLines(anode.body!);
-                    }
-                    ts.forEachChild(anode, nbLinesToDropFunction);
-                };
-                ts.forEachChild(node, nbLinesToDropFunction);
-            }
-            const nbLines = ts.getLineAndCharacterOfPosition(this.sourceFile, node.end).line
-                - ts.getLineAndCharacterOfPosition(this.sourceFile, node.getStart(this.sourceFile)).line;
-            const result = nbLines + 1 - nbLinesToDrop;
-            this.linesOfCode.set(nodeText, result);
-            return result;
+        const lineCountIsCached = this.cache.has(nodeText);
+
+        return lineCountIsCached
+            ? this.cache.get(nodeText)
+            : this.computeLineCount(node);
+    }
+
+    private computeLineCount(node: ts.Node) {
+        let lineCount = this.getNodeLineCount(node) + 1;
+
+        if (!this.options.includesNested) {
+            lineCount -= this.countNestedFunctionLines(node);
         }
+
+        this.cache.set(node.getText(), lineCount); // Cache result
+        return lineCount;
+    }
+
+    private getNodeLineCount(node: ts.Node): number {
+        const firstNodeLine = ts.getLineAndCharacterOfPosition(this.sourceFile, node.getStart(this.sourceFile)).line;
+        const lastNodeLine = ts.getLineAndCharacterOfPosition(this.sourceFile, node.end).line;
+        const lineCount = lastNodeLine - firstNodeLine;
+
+        return lineCount;
+    }
+
+    private countNestedFunctionLines(node: ts.Node): number {
+        let nestedLineCount = 0;
+        const nbLinesToDropFunction = (anode: ts.Node): void => {
+            if (isFunctionDeclaration(anode) || isFunctionWithBody(anode)) {
+                nestedLineCount += this.countLines(anode.body!);
+            }
+            ts.forEachChild(anode, nbLinesToDropFunction);
+        };
+        ts.forEachChild(node, nbLinesToDropFunction);
+        
+        return nestedLineCount;
     }
 }
